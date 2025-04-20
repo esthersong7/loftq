@@ -27,7 +27,13 @@ from transformers import (
 )
 
 from peft import LoftQConfig, LoraConfig, TaskType, get_peft_model
-from safetensors import save_open
+# from safetensors import save_open
+from safetensors import safe_open
+
+from accelerate import Accelerator
+
+
+
 
 
 class Shell(nn.Module):
@@ -124,6 +130,10 @@ def arg_parse():
 def quantize_and_save():
     args = arg_parse()
 
+
+    accelerator = Accelerator()
+    print("Accelerator using device:", accelerator.device)
+
     # Download weights and configure LoRA
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, token=args.token, trust_remote_code=True)
     if any(name in args.model_name_or_path.lower() for name in ["llama", "mistral", "falcon"]):
@@ -133,6 +143,7 @@ def quantize_and_save():
             token=args.token,
             trust_remote_code=True,
             device_map="auto",
+            # device_map={"": device},
         )
         task_type = TaskType.CAUSAL_LM
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
@@ -164,6 +175,7 @@ def quantize_and_save():
     )
 
     # Obtain LoftQ model
+    # import pdb; pdb.set_trace()
     lora_model = get_peft_model(model, lora_config)
     base_model = lora_model.get_base_model()
 

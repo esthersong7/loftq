@@ -28,6 +28,9 @@ from datasets import load_dataset
 from accelerate.utils import set_seed
 
 
+import sys
+
+
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "[PAD]"
 DEFAULT_EOS_TOKEN = "</s>"
@@ -92,13 +95,24 @@ def smart_tokenizer_and_embedding_resize(
 
 
 def evaluation(model_args, data_args):
+
+
+    # log_file = open("evaluation_log.txt", "w", encoding="utf-8")
+    # sys.stdout = log_file
+
+
+    device = torch.device("cuda:0")
+
+
+
     if model_args.full_precision:
         model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             low_cpu_mem_usage=True,
             torch_dtype=torch.bfloat16,
             token=model_args.token,
-            device_map='auto',
+            # device_map='auto',
+            device_map={"": device},
         )
     else:
         model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -106,7 +120,8 @@ def evaluation(model_args, data_args):
             low_cpu_mem_usage=True,
             torch_dtype=torch.bfloat16,
             token=model_args.token,
-            device_map='auto',
+            # device_map='auto',
+            device_map={"": device},
             quantization_config=transformers.BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.bfloat16,
@@ -201,7 +216,16 @@ def evaluation(model_args, data_args):
         batch['input_len'] = len(batch['input_ids'][0])
         question_data.append(batch)
 
+
+    # question_data는 전체 test set을 batch 단위로 토크나이즈한 결과 리스트 -> len 83, 각 element는 16개의 question
+
     model.eval()
+
+    # 모델이 올라간 디바이스 추출
+    device = model.device if hasattr(model, "device") else next(model.parameters()).device
+
+
+
     gen_kwargs = {
         "max_new_tokens": 256,
         "temperature": 0.1,
@@ -213,24 +237,44 @@ def evaluation(model_args, data_args):
     set_seed(42)
     for step, batch in enumerate(question_data):
         with torch.no_grad():
-            gen_kwargs["input_ids"] = batch["input_ids"].to('cuda')
-            gen_kwargs["attention_mask"] = batch["attention_mask"].to('cuda')
+
+
+            # 💥 여기가 핵심: batch 안 모든 tensor 통째로 옮기기
+            for k in batch:
+                if torch.is_tensor(batch[k]):
+                    batch[k] = batch[k].to(device)
+
+
+
+
+            # gen_kwargs["input_ids"] = batch["input_ids"].to('cuda')
+            # gen_kwargs["attention_mask"] = batch["attention_mask"].to('cuda')
+            # 🔥 input tensor를 모델 디바이스로 맞춤
+            gen_kwargs["input_ids"] = batch["input_ids"].to(device)
+            gen_kwargs["attention_mask"] = batch["attention_mask"].to(device)
             generated_tokens = model.generate(**gen_kwargs)
 
         pred_tokens = generated_tokens[:, batch['input_len']:]
         decoded_pred = tokenizer.batch_decode(pred_tokens, skip_special_tokens=True)
 
+        with open("evaluation_log.txt", "a", encoding="utf-8") as log_file:
+            print(f"Step {step}:", file=log_file)
+            print(decoded_pred, file=log_file)
+
         # Extract the numbers in sentences
-        print(decoded_pred)
+        # print(decoded_pred)
         ans_pred_list += [extract_answer_number(sentence_pred) for sentence_pred in decoded_pred]
 
-    print("prediction", ans_pred_list)
-    print("ground truth", answer)
+    with open("evaluation_log.txt", "a", encoding="utf-8") as log_file:
+        print("prediction", ans_pred_list, file=log_file)
+        print("ground truth", answer, file=log_file)
 
-    accuracy = compute_accuracy(answer, ans_pred_list)
 
-    print(f"adapter: {model_args.adapter_name_or_path} | GSM8K test accuracy: {100*accuracy:.2f}% | "
-          f"full precision: {model_args.full_precision}")
+        accuracy = compute_accuracy(answer, ans_pred_list)
+        print(f"adapter: {model_args.adapter_name_or_path} | GSM8K test accuracy: {100*accuracy:.2f}% | "
+        f"full precision: {model_args.full_precision}", file=log_file)
+    
+    
 
 
 def extract_answer_number(sentence: str) -> float:

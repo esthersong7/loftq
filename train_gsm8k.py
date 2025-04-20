@@ -15,6 +15,9 @@ from transformers import Trainer
 from peft import PeftModel, LoraConfig, TaskType, get_peft_model
 from datasets import load_dataset
 
+from safetensors.torch import load_file, safe_open
+
+
 
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "[PAD]"
@@ -56,6 +59,10 @@ class ModelArguments:
     token: Optional[str] = field(
         default=None,
         metadata={"help": "HF token to access to private models, e.g., meta-llama"},
+    )
+    num_bits: Optional[int] = field(
+        default=None,
+        metadata={"help": "Quantization bit-width (e.g. 2, 4, 8)"}
     )
 
 
@@ -193,9 +200,15 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, dat
     return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
 
 
+# eval dataset 을 넣어주고 , 몇 step 마다 eval 할지
+
+
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    import pdb; pdb.set_trace()
+
 
     if model_args.full_precision:
         model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -204,7 +217,7 @@ def train():
             torch_dtype=torch.bfloat16,
             token=model_args.token,
         )
-    else:
+    elif model_args.num_bits == 4:
         model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             low_cpu_mem_usage=True,
@@ -217,6 +230,44 @@ def train():
                 bnb_4bit_quant_type='nf4',
             ),
         )
+    else:
+
+
+        # 1. 모델 구조 + config 로딩
+        model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_args.model_name_or_path,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.bfloat16,
+            token=model_args.token,
+            # device_map=device_map,
+            trust_remote_code=True
+        )
+
+
+
+
+
+        # model = AutoModelForCausalLM.from_pretrained(
+        #     base_model_path="meta-llama/Llama-2-7b-hf",
+        #     torch_dtype=torch.bfloat16,
+        #     device_map="cuda",
+        #     trust_remote_code=True
+        # )
+
+
+
+
+        # index_path = f"{model_args.model_name_or_path}/model.safetensors.index.json"
+        # with open(index_path, "r") as f:
+        #     index = json.load(f)
+
+        # weight_map = index["weight_map"]
+        # for shard_file in set(weight_map.values()):
+        #     shard_path = f"{model_args.model_name_or_path}/{shard_file}"
+        #     with safe_open(shard_path, framework="pt", device="cpu") as f:
+        #         for key in f.keys():
+        #             model.state_dict()[key].copy_(f.get_tensor(key))
+
     ##########################
     #       Peft Model       #
     ##########################
