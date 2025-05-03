@@ -11,7 +11,8 @@ python train_gsm8k.py \
     --num_train_epochs 6 \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 8 \
-    --evaluation_strategy "epoch" \
+    --evaluation_strategy "steps" \
+    --eval_steps 500 \
     --save_strategy "epoch" \
     --weight_decay 0.1 \
     --warmup_ratio 0.03 \

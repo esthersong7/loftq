@@ -196,8 +196,9 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, dat
     dataset = load_dataset(data_args.data_name, "main")
     train_set = dataset['train']
     train_dataset = SupervisedDataset(raw_data=train_set, tokenizer=tokenizer)
+    eval_dataset = SupervisedDataset(raw_data=dataset['test'], tokenizer=tokenizer)            #######
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
-    return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
+    return dict(train_dataset=train_dataset, eval_dataset=eval_dataset, data_collator=data_collator)
 
 
 # eval dataset 을 넣어주고 , 몇 step 마다 eval 할지
