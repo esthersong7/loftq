@@ -1,21 +1,4 @@
-from peft import LoftQConfig
-
-# /home/esthersong/miniconda3/envs/loftq/lib/python3.10/site-packages/peft/tuners/lora/config.py
-
-
-class CloQConfig(LoftQConfig):
-    def __init__(self, activation_dict: dict, **kwargs):
-        super().__init__(**kwargs)
-        self.activation_dict = activation_dict
-
-        # calibration dataset? or activation dict?
-
-
-
-
-
-
-
+import torch
 
 @torch.no_grad()
 def cloq_init(delta_W: torch.Tensor, num_bits: int, reduced_rank: int, activation: torch.Tensor):

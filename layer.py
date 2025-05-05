@@ -145,11 +145,9 @@ class LoraLayer(BaseTunerLayer):
                 self.olora_init(adapter_name)
         elif init_lora_weights == "loftq":
             with gather_params_ctx(self.get_base_layer().weight):
-                self.loftq_init(adapter_name)
-
-        elif init_lora_weights == "cloq":
-            with gather_params_ctx(self.get_base_layer().weight):       ## ???????
+                # self.loftq_init(adapter_name)
                 self.cloq_init(adapter_name)
+
 
         elif init_lora_weights == "eva":
             nn.init.zeros_(self.lora_B[adapter_name].weight)
@@ -296,20 +294,21 @@ class LoraLayer(BaseTunerLayer):
 
     def cloq_init(self, adapter_name):
         from peft.utils.cloq_utils import cloq_init     ## 어디서 import ????
+        from peft.utils.config import CloQConfig     ## 어디서 import ????
 
 
 
-        weight = self.get_base_layer().weight
-        activation = self.peft_config.loftq_config.activation_dict.get(adapter_name)
 
+        W = self.get_base_layer().weight
+        Q = self.peft_config.loftq_config.quant_dict[adapter_name]
+        X = self.peft_config.loftq_config.activation_dict[adapter_name]
 
-        # preprocess - MagR
-        # GPTQ quantization - Q 구하기
-        # GPTQ config로 해야하나??
+        delta_W = W - Q
 
-        # self.~ attribute로 activation 넣기
-        # forward hook
+        self.get_base_layer().weight.data = Q
 
+        del self.peft_config.loftq_config.quant_dict[adapter_name]  # Q 메모리 해제
+        torch.cuda.empty_cache()  # optional: 즉시 메모리 반환
 
         kwargs = {
             "num_bits": self.kwargs.get("loftq_bits", 4),
@@ -317,8 +316,14 @@ class LoraLayer(BaseTunerLayer):
             "num_iter": self.kwargs.get("loftq_iter", 1),
         }
 
-        qweight, lora_A, lora_B = cloq_init(weight, num_bits=self.peft_config.loftq_config.loftq_bits, reduced_rank=self.r[adapter_name], activation=activation)
-        
+
+        lora_A, lora_B = cloq_init(delta_W, num_bits=self.peft_config.loftq_config.loftq_bits, reduced_rank=self.r[adapter_name], activation=X)
+
+
+        del self.peft_config.loftq_config.activation_dict[adapter_name]  # X 메모리 해제
+        torch.cuda.empty_cache()  # optional: 즉시 메모리 반환
+
+
         if adapter_name in self.lora_A.keys():
             # initialize A the same way as the default for nn.Linear and B to zero
             self.lora_A[adapter_name].weight.data = lora_A
@@ -327,11 +332,6 @@ class LoraLayer(BaseTunerLayer):
             # initialize a the same way as the default for nn.linear and b to zero
             self.lora_embedding_A[adapter_name].weight.data = lora_A
             self.lora_embedding_B[adapter_name].weight.data = lora_B
-        self.get_base_layer().weight.data = qweight
-
-
-
-
 
 
 

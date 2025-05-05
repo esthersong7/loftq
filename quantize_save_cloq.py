@@ -30,7 +30,11 @@ from peft import LoftQConfig, LoraConfig, TaskType, get_peft_model
 # from safetensors import save_open
 from safetensors import safe_open
 
-from accelerate import Accelerator
+# from accelerate import Accelerator
+
+from transformers import GPTQConfig
+
+from config import CloQConfig       ## ??? iimport 어디서?
 
 
 
@@ -123,18 +127,133 @@ def arg_parse():
         default="./model_zoo/loftq/",
         help="The rank of the LoRA adapter",
     )
+
+
+    # for CloQ
+    parser.add_argument(
+        "--group_size",
+        type=int,
+        default=128,
+        help="group_size (`int`, *optional*, defaults to 128):The group size to use for quantization. Recommended value is 128 and -1 uses per-column quantization.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default='wikitext2',
+        help="dataset (`Union[List[str]]`, *optional*):The dataset used for quantization. You can provide your own dataset in a list of string or just use the original datasets used in GPTQ paper ['wikitext2','c4','c4-new']",
+    )
+
+
     args = parser.parse_args()
     return args
+
+
+
+def get_calibration_loader(tokenizer):
+    from datasets import load_dataset
+    from transformers import AutoTokenizer
+    import torch
+    from torch.utils.data import DataLoader
+
+    # 1. Load WikiText-2 dataset
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+
+    # # 2. Load tokenizer (LLaMA tokenizer로 교체 가능)
+    # tokenizer = AutoTokenizer.from_pretrained("gpt2")  # 예시: LLaMA tokenizer로 변경 가능
+    # tokenizer.pad_token = tokenizer.eos_token
+
+    # 3. Tokenize first 128 samples with context length 2048
+    def tokenize(example):
+        return tokenizer(
+            example["text"],
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=2048,        # l= 2048
+        )
+
+    dataset = dataset.filter(lambda x: len(x["text"]) > 0).shuffle(seed=42).select(range(128))
+    tokenized = dataset.map(tokenize, batched=False)
+
+    # 4. Convert to TensorDataset
+    input_ids = torch.stack([x["input_ids"].squeeze(0) for x in tokenized])
+    attention_mask = torch.stack([x["attention_mask"].squeeze(0) for x in tokenized])
+
+    calibration_dataset = torch.utils.data.TensorDataset(input_ids, attention_mask)
+    calibration_loader = DataLoader(calibration_dataset, batch_size=1)  # b=128, l=2048
+
+    # → 이 loader를 forward에 넣으면 X ∈ ℝᵇˡˣᵐ 에 해당하는 activation을 hook으로 수집할 수 있어
+    return calibration_loader
+
+
+
+
+
+def register_activation_hooks(model, activation_dict, target_module_names):
+    def get_hook(name):
+        def hook(module, input, output):
+            # input[0]: shape (b, l, m)
+            activation_dict[name] = input[0].detach().reshape(-1, input[0].shape[-1])   # (b*l,m)
+        return hook
+
+    for name, module in model.named_modules():
+        if any(target in name for target in target_module_names):
+            module.register_forward_hook(get_hook(name))
+
+
 
 
 def quantize_and_save():
     args = arg_parse()
 
 
-    accelerator = Accelerator()
-    print("Accelerator using device:", accelerator.device)
 
-    # Download weights and configure LoRA
+    # preprocess?>?
+    # MagR ??
+
+
+    
+
+    # GPTQ quantized model
+
+    quantization_config = GPTQConfig(
+        bits=args.bits,
+        group_size=args.group_size,
+        dataset=args.dataset,
+        desc_act=False,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, token=args.token, trust_remote_code=True)
+    quant_model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, quantization_config=quantization_config, device_map='auto')
+
+    # Q data
+    quantized_weights = {name: param.data.clone() for name, param in quant_model.named_parameters() if param.ndim == 2}
+    
+
+    # collect activation data X of Quantized model using forward hooks
+    activation_dict = {}
+    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
+    register_activation_hooks(quant_model, activation_dict, target_modules)
+
+
+    calibration_loader = get_calibration_loader(tokenizer)
+
+
+    quant_model.eval()
+    with torch.no_grad():
+        for batch in calibration_loader:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            _ = quant_model(input_ids=input_ids, attention_mask=attention_mask)
+
+
+    del quant_model
+    torch.cuda.empty_cache()
+    
+
+    
+
+    # Download Full Precision weights and configure LoRA
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, token=args.token, trust_remote_code=True)
     if any(name in args.model_name_or_path.lower() for name in ["llama", "mistral", "falcon"]):
         model = AutoModelForCausalLM.from_pretrained(
@@ -160,10 +279,11 @@ def quantize_and_save():
     else:
         raise NotImplementedError("Other models not supported yet.")
 
-    import pdb; pdb.set_trace()
+
+
 
     # Config of LoftQ
-    loftq_config = LoftQConfig(loftq_bits=args.bits, loftq_iter=args.iter)
+    cloq_config = CloQConfig(loftq_bits=args.bits, loftq_iter=args.iter, quantized_weights=quantized_weights, activations=activation_dict)
 
     lora_config = LoraConfig(
         task_type=task_type,
@@ -172,13 +292,16 @@ def quantize_and_save():
         lora_alpha=16 if task_type is TaskType.CAUSAL_LM and args.bits == 4 else args.rank,
         lora_dropout=0.1,
         target_modules=target_modules,
-        init_lora_weights="loftq",
-        loftq_config=loftq_config,
+        init_lora_weights="cloq",
+        cloq_config=cloq_config,
     )
+
+    ## LoraConfig도 수정해야하니??????????????????????????
+
 
     # Obtain LoftQ model
     # import pdb; pdb.set_trace()
-    lora_model = get_peft_model(model, lora_config)
+    lora_model = get_peft_model(model, lora_config)         # Q, A, B with CloQ initialization
     base_model = lora_model.get_base_model()
 
     # Save LoftQ model
