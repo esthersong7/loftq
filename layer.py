@@ -145,9 +145,11 @@ class LoraLayer(BaseTunerLayer):
                 self.olora_init(adapter_name)
         elif init_lora_weights == "loftq":
             with gather_params_ctx(self.get_base_layer().weight):
-                # self.loftq_init(adapter_name)
-                self.cloq_init(adapter_name)
+                self.loftq_init(adapter_name)
 
+        elif init_lora_weights == "cloq":
+            with gather_params_ctx(self.get_base_layer().weight):
+                self.cloq_init(adapter_name)
 
         elif init_lora_weights == "eva":
             nn.init.zeros_(self.lora_B[adapter_name].weight)
@@ -293,10 +295,8 @@ class LoraLayer(BaseTunerLayer):
 
 
     def cloq_init(self, adapter_name):
-        from peft.utils.cloq_utils import cloq_init     ## 어디서 import ????
-        from peft.utils.config import CloQConfig     ## 어디서 import ????
-
-
+        from cloq_utils import cloq_init     ## 어디서 import ????
+        from config import CloQConfig     ## 어디서 import ????
 
 
         W = self.get_base_layer().weight

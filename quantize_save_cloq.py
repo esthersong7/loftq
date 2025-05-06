@@ -95,7 +95,14 @@ def arg_parse():
         type=str,
         default=None,
         required=True,
-        help="The name or path of the fp32/16 model.",
+        help="The name or path of the full precision model.",
+    )
+    parser.add_argument(
+        "--quant_model_path",
+        type=str,
+        default=None,
+        required=True,
+        help="The name or path of the GPTQ quantized model.",
     )
     parser.add_argument(
         "--token",
@@ -113,39 +120,32 @@ def arg_parse():
         "--iter",
         type=int,
         default=1,
-        help="The alternating steps in LoftQ",
+        help="The alternating steps in CloQ",
     )
     parser.add_argument(
         "--rank",
         type=int,
-        default=16,
+        default=64,
         help="The rank of the LoRA adapter",
     )
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./model_zoo/loftq/",
-        help="The rank of the LoRA adapter",
+        default="./model_zoo/cloq/",
+        help="Lora model save directory",
     )
 
 
-    # for CloQ
-    parser.add_argument(
-        "--group_size",
-        type=int,
-        default=128,
-        help="group_size (`int`, *optional*, defaults to 128):The group size to use for quantization. Recommended value is 128 and -1 uses per-column quantization.",
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default='wikitext2',
-        help="dataset (`Union[List[str]]`, *optional*):The dataset used for quantization. You can provide your own dataset in a list of string or just use the original datasets used in GPTQ paper ['wikitext2','c4','c4-new']",
-    )
+
 
 
     args = parser.parse_args()
     return args
+
+
+
+
+
 
 
 
@@ -176,8 +176,8 @@ def get_calibration_loader(tokenizer):
     tokenized = dataset.map(tokenize, batched=False)
 
     # 4. Convert to TensorDataset
-    input_ids = torch.stack([x["input_ids"].squeeze(0) for x in tokenized])
-    attention_mask = torch.stack([x["attention_mask"].squeeze(0) for x in tokenized])
+    input_ids = torch.stack([torch.tensor(x["input_ids"]).squeeze(0) for x in tokenized])
+    attention_mask = torch.stack([torch.tensor(x["attention_mask"]).squeeze(0) for x in tokenized])
 
     calibration_dataset = torch.utils.data.TensorDataset(input_ids, attention_mask)
     calibration_loader = DataLoader(calibration_dataset, batch_size=1)  # b=128, l=2048
@@ -192,8 +192,12 @@ def get_calibration_loader(tokenizer):
 def register_activation_hooks(model, activation_dict, target_module_names):
     def get_hook(name):
         def hook(module, input, output):
-            # input[0]: shape (b, l, m)
-            activation_dict[name] = input[0].detach().reshape(-1, input[0].shape[-1])   # (b*l,m)
+            if name not in activation_dict:
+                activation_dict[name] = []
+
+            # input[0]: shape (b, l, m) ＝ (1,2048,m)
+            activation_dict[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))     #(2048,m)
+        
         return hook
 
     for name, module in model.named_modules():
@@ -206,29 +210,33 @@ def register_activation_hooks(model, activation_dict, target_module_names):
 def quantize_and_save():
     args = arg_parse()
 
-
+    device = torch.device("cuda:0")
 
     # preprocess?>?
     # MagR ??
 
 
+
     
 
-    # GPTQ quantized model
+    # load GPTQ quantized model
 
-    quantization_config = GPTQConfig(
-        bits=args.bits,
-        group_size=args.group_size,
-        dataset=args.dataset,
-        desc_act=False,
-    )
+    # quantization_config = GPTQConfig(
+    #     bits=args.bits,
+    #     group_size=args.group_size,
+    #     dataset=args.dataset,
+    #     desc_act=False,
+    # )
+
+
+    quant_model = AutoModelForCausalLM.from_pretrained(args.quant_model_path, device_map={"": device})
+    
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, token=args.token, trust_remote_code=True)
-    quant_model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, quantization_config=quantization_config, device_map='auto')
+    tokenizer.pad_token = tokenizer.eos_token
 
-    # Q data
-    quantized_weights = {name: param.data.clone() for name, param in quant_model.named_parameters() if param.ndim == 2}
-    
+
+
 
     # collect activation data X of Quantized model using forward hooks
     activation_dict = {}
@@ -238,31 +246,46 @@ def quantize_and_save():
 
     calibration_loader = get_calibration_loader(tokenizer)
 
+    print("start calibration")
 
     quant_model.eval()
     with torch.no_grad():
         for batch in calibration_loader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
+            input_ids = batch[0].to(device)
+            attention_mask = batch[1].to(device)
             _ = quant_model(input_ids=input_ids, attention_mask=attention_mask)
+
+            del input_ids
+            del attention_mask
+            torch.cuda.empty_cache()
+
+
+    # X data - stack to (b*l,m)
+    for name in activation_dict:
+        activation_dict[name] = torch.cat(activation_dict[name], dim=0)  # (b*l, m) = (128*2048,m)
+
+    print("done calibration")
+
+    # Q data
+    quantized_weights = {name: param.data.clone().to("cpu") for name, param in quant_model.named_parameters() if param.ndim == 2}
 
 
     del quant_model
     torch.cuda.empty_cache()
+    torch.synchronize()
     
 
-    
 
     # Download Full Precision weights and configure LoRA
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, token=args.token, trust_remote_code=True)
+    # tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, token=args.token, trust_remote_code=True)
     if any(name in args.model_name_or_path.lower() for name in ["llama", "mistral", "falcon"]):
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
             torch_dtype=torch.bfloat16,
             token=args.token,
             trust_remote_code=True,
-            device_map="auto",
-            # device_map={"": device},
+            # device_map="auto",
+            device_map={"": device},
         )
         task_type = TaskType.CAUSAL_LM
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
@@ -280,6 +303,9 @@ def quantize_and_save():
         raise NotImplementedError("Other models not supported yet.")
 
 
+
+    
+    import pdb; pdb.set_trace()
 
 
     # Config of LoftQ
@@ -307,7 +333,7 @@ def quantize_and_save():
     # Save LoftQ model
     model_name = args.model_name_or_path.split("/")[-1] + f"-{args.bits}bit" + f"-{args.rank}rank"
     base_model_dir = os.path.join(args.save_dir, model_name)
-    lora_model_dir = os.path.join(args.save_dir, model_name, "loftq_init")
+    lora_model_dir = os.path.join(args.save_dir, model_name, "cloq_init")
 
     lora_model.save_pretrained(lora_model_dir)
     print_model(lora_model, "lora_model")
