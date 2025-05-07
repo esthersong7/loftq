@@ -26,7 +26,7 @@ from transformers import (
     AutoTokenizer,
 )
 
-from peft import LoftQConfig, LoraConfig, TaskType, get_peft_model
+from peft import LoftQConfig, TaskType, get_peft_model
 # from safetensors import save_open
 from safetensors import safe_open
 
@@ -34,7 +34,7 @@ from safetensors import safe_open
 
 from transformers import GPTQConfig
 
-from config import CloQConfig       ## ??? iimport 어디서?
+from config import CloQConfig, LoraConfig       ## ??? iimport 어디서?
 
 
 
@@ -189,14 +189,22 @@ def get_calibration_loader(tokenizer):
 
 
 
-def register_activation_hooks(model, activation_dict, target_module_names):
+def register_activation_hooks(model, hessian_dict, target_module_names):
     def get_hook(name):
         def hook(module, input, output):
-            if name not in activation_dict:
-                activation_dict[name] = []
+            
+            X = input[0].detach().reshape(-1, input[0].shape[-1])       #(b,l,m) -> (b*l,m)=(1*2048,m)
+            H = X.T @ X                                                 #(m,m)
+            H_cpu = H.cpu()
 
-            # input[0]: shape (b, l, m) ＝ (1,2048,m)
-            activation_dict[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))     #(2048,m)
+            if name not in hessian_dict:
+                hessian_dict[name] = H_cpu
+            else:
+                hessian_dict[name] += H_cpu
+
+            del H
+            del X
+            torch.cuda.empty_cache()
         
         return hook
 
@@ -208,6 +216,11 @@ def register_activation_hooks(model, activation_dict, target_module_names):
 
 
 def quantize_and_save():
+
+
+    import sys
+    print("🔍 PYTHONPATH check:", sys.path[0])
+
     args = arg_parse()
 
     device = torch.device("cuda:0")
@@ -235,44 +248,59 @@ def quantize_and_save():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, token=args.token, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
+    
+    # hessian_filename = f"Llama-2-7b-hf_{args.bits}bit_hessian_dict.pt"
+    # # hessian_path = os.path.join(args.save_dir, hessian_filename)
 
 
+    # if not os.path.exists(hessian_filename):
+    #     print("No saved Hessian found — starting calibration...")
 
-    # collect activation data X of Quantized model using forward hooks
-    activation_dict = {}
-    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
-    register_activation_hooks(quant_model, activation_dict, target_modules)
-
-
-    calibration_loader = get_calibration_loader(tokenizer)
-
-    print("start calibration")
-
-    quant_model.eval()
-    with torch.no_grad():
-        for batch in calibration_loader:
-            input_ids = batch[0].to(device)
-            attention_mask = batch[1].to(device)
-            _ = quant_model(input_ids=input_ids, attention_mask=attention_mask)
-
-            del input_ids
-            del attention_mask
-            torch.cuda.empty_cache()
+    #     # collect activation data X of Quantized model using forward hooks
+    #     hessian_dict = {}
+    #     target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
+    #     register_activation_hooks(quant_model, hessian_dict, target_modules)
 
 
-    # X data - stack to (b*l,m)
-    for name in activation_dict:
-        activation_dict[name] = torch.cat(activation_dict[name], dim=0)  # (b*l, m) = (128*2048,m)
+    #     calibration_loader = get_calibration_loader(tokenizer)
 
-    print("done calibration")
+    #     print("start calibration")
 
-    # Q data
+    #     quant_model.eval()
+    #     with torch.no_grad():
+    #         for batch in calibration_loader:
+    #             input_ids = batch[0].to(device)
+    #             attention_mask = batch[1].to(device)
+    #             _ = quant_model(input_ids=input_ids, attention_mask=attention_mask)
+
+    #             del input_ids
+    #             del attention_mask
+    #             torch.cuda.empty_cache()
+
+    #             break
+
+
+    #     print("done calibration")
+
+    #     torch.save(hessian_dict, hessian_filename)
+    #     print(f"Saved hessian_dict to {hessian_filename}")
+
+
+    # # load hessian dict to CPU
+    # hessian_dict = torch.load(hessian_filename, map_location="cpu")
+    # print(f"Loaded hessian_dict from {hessian_filename}")
+
+    ##
+    hessian_dict={}
+
+   
+    # Q data - CPU
     quantized_weights = {name: param.data.clone().to("cpu") for name, param in quant_model.named_parameters() if param.ndim == 2}
 
 
     del quant_model
     torch.cuda.empty_cache()
-    torch.synchronize()
+    torch.cuda.synchronize()
     
 
 
@@ -304,12 +332,14 @@ def quantize_and_save():
 
 
 
-    
+
     import pdb; pdb.set_trace()
 
 
     # Config of LoftQ
-    cloq_config = CloQConfig(loftq_bits=args.bits, loftq_iter=args.iter, quantized_weights=quantized_weights, activations=activation_dict)
+    cloq_config = CloQConfig(loftq_bits=args.bits, loftq_iter=args.iter, quant_dict=quantized_weights, activation_dict=hessian_dict)
+    # quant dict, activation dict - both cpu
+
 
     lora_config = LoraConfig(
         task_type=task_type,
