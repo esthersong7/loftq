@@ -301,7 +301,7 @@ class LoraLayer(BaseTunerLayer):
 
         W = self.get_base_layer().weight
         Q = self.peft_config.loftq_config.quant_dict[adapter_name]
-        X = self.peft_config.loftq_config.activation_dict[adapter_name]
+        H = self.peft_config.loftq_config.activation_dict[adapter_name]
 
         delta_W = W - Q
 
@@ -317,10 +317,10 @@ class LoraLayer(BaseTunerLayer):
         }
 
 
-        lora_A, lora_B = cloq_init(delta_W, num_bits=self.peft_config.loftq_config.loftq_bits, reduced_rank=self.r[adapter_name], activation=X)
+        lora_A, lora_B = cloq_init(delta_W, num_bits=self.peft_config.loftq_config.loftq_bits, reduced_rank=self.r[adapter_name], hessian=H)
 
 
-        del self.peft_config.loftq_config.activation_dict[adapter_name]  # X 메모리 해제
+        del self.peft_config.loftq_config.activation_dict[adapter_name]  # H 메모리 해제
         torch.cuda.empty_cache()  # optional: 즉시 메모리 반환
 
 

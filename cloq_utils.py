@@ -1,10 +1,10 @@
 import torch
 
 @torch.no_grad()
-def cloq_init(delta_W: torch.Tensor, num_bits: int, reduced_rank: int, activation: torch.Tensor):
+def cloq_init(delta_W: torch.Tensor, num_bits: int, reduced_rank: int, hessian: torch.Tensor):
     """
-    weight: (out_features, in_features)
-    activation: (batch_size, in_features)
+    delta_W: (out_features, in_features)
+    hessian: (batch_size, in_features)
     """
     device = delta_W.device
     dtype = delta_W.dtype
@@ -18,13 +18,13 @@ def cloq_init(delta_W: torch.Tensor, num_bits: int, reduced_rank: int, activatio
     # delta_W = weight - dequantized_weight
 
     # 3. Gram matrix H = X^T X
-    H = activation.T @ activation
-    m = H.size(0)
-    lam = 0.01 * torch.trace(H) / m
-    H += lam * torch.eye(m, device=H.device, dtype=H.dtype)
+    # H = activation.T @ activation
+    m = hessian.size(0)
+    lam = 0.01 * torch.trace(hessian) / m
+    hessian += lam * torch.eye(m, device=hessian.device, dtype=hessian.dtype)
 
     # 4. SVD on H
-    U_H, Sigma_H, _ = torch.linalg.svd(H)
+    U_H, Sigma_H, _ = torch.linalg.svd(hessian)
     R = torch.diag(Sigma_H.sqrt()) @ U_H.T
 
     # 5. SVD on R @ delta_W
