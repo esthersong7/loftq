@@ -143,11 +143,11 @@ class LoraLayer(BaseTunerLayer):
         elif isinstance(init_lora_weights, str) and init_lora_weights.lower() == "olora":
             with gather_params_ctx(self.get_base_layer().weight):
                 self.olora_init(adapter_name)
-        elif init_lora_weights == "loftq":
-            with gather_params_ctx(self.get_base_layer().weight):
-                self.loftq_init(adapter_name)
+        # elif init_lora_weights == "loftq":
+        #     with gather_params_ctx(self.get_base_layer().weight):
+        #         self.loftq_init(adapter_name)
 
-        elif init_lora_weights == "cloq":
+        elif init_lora_weights == "loftq":
             with gather_params_ctx(self.get_base_layer().weight):
                 self.cloq_init(adapter_name)
 

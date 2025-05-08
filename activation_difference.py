@@ -1,36 +1,13 @@
 import torch
 import argparse
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedTokenizer, PreTrainedModel, LlamaForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, PreTrainedTokenizer, PreTrainedModel, LlamaForCausalLM, GPTQConfig
+# from auto_gptq import AutoGPTQForCausalLM
 from peft import PeftModel,PeftModelForCausalLM
 from datasets import load_dataset
 import pandas as pd
 from typing import Dict, List
 import os
-
-
-def get_model(model_path: str, is_quant: bool, adapter_subfolder: str = None):
-    if is_quant:
-        base = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            quantization_config=BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=False,
-            ),
-            device_map={"": "cuda:0"},
-        )
-    else:
-        base = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map={"": "cuda:0"},
-        )
-    if adapter_subfolder is not None:
-        base = PeftModel.from_pretrained(base, model_path, subfolder=adapter_subfolder, is_trainable=False)
-    return base.eval()
 
 
 
@@ -126,8 +103,11 @@ def register_hooks(model, activations_dict: Dict[str, List[torch.Tensor]]):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--ft", type=bool, default=False)
     parser.add_argument("--baseline_model_path", type=str, required=True)
+    parser.add_argument("--baseline_model_adapter_path", type=str, default=None)
     parser.add_argument("--quant_model_path", type=str, required=True)
+    parser.add_argument("--quant_adapter_path", type=str, required=True)
     parser.add_argument("--quant_adapter_subfolder", type=str, default="loftq_init")
     parser.add_argument("--num_inputs", type=int, default=20)
     parser.add_argument("--metric", type=str, choices=["mse", "cosine"], default="mse")
@@ -150,10 +130,70 @@ def main():
 
 
     # Load models
-    model_fp = get_model(args.baseline_model_path, is_quant=False)
-    model_q = get_model(args.quant_model_path, is_quant=True, adapter_subfolder=args.quant_adapter_subfolder)
+
+    # load baseline (FP LLama2-7b) model
+
+    model_fp = AutoModelForCausalLM.from_pretrained(
+        args.baseline_model_path,
+        torch_dtype=torch.bfloat16,
+        device_map={"": "cuda:0"},
+    )
+    if args.ft and args.baseline_model_adapter_path is not None:
+        model_fp = PeftModel.from_pretrained(model_fp, args.baseline_model_adapter_path, is_trainable=False)
+
 
     smart_tokenizer_and_embedding_resize(special_tokens_dict, tokenizer, model_fp)
+
+
+    # load LoftQ / CloQ  model
+    model_q = AutoModelForCausalLM.from_pretrained(
+        args.quant_model_path,
+        torch_dtype=torch.bfloat16,
+        quantization_config=BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=False,
+        ),
+        device_map={"": "cuda:0"},
+    )
+
+    # base = AutoGPTQForCausalLM.from_quantized(
+    #     model_path,
+    #     device="cuda:0",
+    #     use_safetensors=True,
+    #     torch_dtype="auto",
+    #     trust_remote_code=True,
+    # )
+
+    # base = AutoModelForCausalLM.from_pretrained(
+    #     model_path,
+    #     # device_map="auto",
+    #     device_map={"": "cuda:0"},
+    #     trust_remote_code=True,
+    #     torch_dtype="auto"
+    # )
+
+    # base = AutoModelForCausalLM.from_pretrained(
+    #     model_path,
+    #     # device_map="auto",
+    #     quantization_config = GPTQConfig(
+    #         bits=4,
+    #         group_size=128,
+    #         dataset="wikitext2",
+    #         desc_act=False,
+    #     ),
+
+    #     device_map={"": "cuda:0"},
+    #     trust_remote_code=True,
+    #     torch_dtype="auto"
+    # )
+
+    smart_tokenizer_and_embedding_resize(special_tokens_dict, tokenizer, model_q)
+
+
+    model_q = PeftModel.from_pretrained(model_q, args.quant_adapter_path, subfolder=args.quant_adapter_subfolder, is_trainable=False)
+
     smart_tokenizer_and_embedding_resize(special_tokens_dict, tokenizer, model_q)
 
 
@@ -184,7 +224,7 @@ def main():
         _ = model_q(**inputs)
 
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
 
     # Compute difference

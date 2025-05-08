@@ -249,49 +249,46 @@ def quantize_and_save():
     tokenizer.pad_token = tokenizer.eos_token
 
     
-    # hessian_filename = f"Llama-2-7b-hf_{args.bits}bit_hessian_dict.pt"
-    # # hessian_path = os.path.join(args.save_dir, hessian_filename)
+    hessian_filename = f"Llama-2-7b-hf_{args.bits}bit_hessian_dict.pt"
+    # hessian_path = os.path.join(args.save_dir, hessian_filename)
 
 
-    # if not os.path.exists(hessian_filename):
-    #     print("No saved Hessian found — starting calibration...")
+    if not os.path.exists(hessian_filename):
+        print("No saved Hessian found — starting calibration...")
 
-    #     # collect activation data X of Quantized model using forward hooks
-    #     hessian_dict = {}
-    #     target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
-    #     register_activation_hooks(quant_model, hessian_dict, target_modules)
-
-
-    #     calibration_loader = get_calibration_loader(tokenizer)
-
-    #     print("start calibration")
-
-    #     quant_model.eval()
-    #     with torch.no_grad():
-    #         for batch in calibration_loader:
-    #             input_ids = batch[0].to(device)
-    #             attention_mask = batch[1].to(device)
-    #             _ = quant_model(input_ids=input_ids, attention_mask=attention_mask)
-
-    #             del input_ids
-    #             del attention_mask
-    #             torch.cuda.empty_cache()
-
-    #             break
+        # collect activation data X of Quantized model using forward hooks
+        hessian_dict = {}
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"]
+        register_activation_hooks(quant_model, hessian_dict, target_modules)
 
 
-    #     print("done calibration")
+        calibration_loader = get_calibration_loader(tokenizer)
 
-    #     torch.save(hessian_dict, hessian_filename)
-    #     print(f"Saved hessian_dict to {hessian_filename}")
+        print("start calibration")
+
+        quant_model.eval()
+        with torch.no_grad():
+            for batch in calibration_loader:
+                input_ids = batch[0].to(device)
+                attention_mask = batch[1].to(device)
+                _ = quant_model(input_ids=input_ids, attention_mask=attention_mask)
+
+                del input_ids
+                del attention_mask
+                torch.cuda.empty_cache()
 
 
-    # # load hessian dict to CPU
-    # hessian_dict = torch.load(hessian_filename, map_location="cpu")
-    # print(f"Loaded hessian_dict from {hessian_filename}")
+        print("done calibration")
 
-    ##
-    hessian_dict={}
+        torch.save(hessian_dict, hessian_filename)
+        print(f"Saved hessian_dict to {hessian_filename}")
+
+
+    # load hessian dict to CPU
+    hessian_dict = torch.load(hessian_filename, map_location="cpu")
+    print(f"Loaded hessian_dict from {hessian_filename}")
+
+
 
    
     # Q data - CPU
@@ -333,7 +330,7 @@ def quantize_and_save():
 
 
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
 
     # Config of LoftQ
@@ -348,11 +345,10 @@ def quantize_and_save():
         lora_alpha=16 if task_type is TaskType.CAUSAL_LM and args.bits == 4 else args.rank,
         lora_dropout=0.1,
         target_modules=target_modules,
-        init_lora_weights="cloq",
-        cloq_config=cloq_config,
+        init_lora_weights="loftq",
+        loftq_config=cloq_config,
     )
 
-    ## LoraConfig도 수정해야하니??????????????????????????
 
 
     # Obtain LoftQ model
@@ -364,6 +360,14 @@ def quantize_and_save():
     model_name = args.model_name_or_path.split("/")[-1] + f"-{args.bits}bit" + f"-{args.rank}rank"
     base_model_dir = os.path.join(args.save_dir, model_name)
     lora_model_dir = os.path.join(args.save_dir, model_name, "cloq_init")
+
+    import pdb; pdb.set_trace()
+
+    adapter_cfg = lora_model.peft_config["default"]
+    adapter_cfg.loftq_config["quant_dict"] = {}
+    adapter_cfg.loftq_config["activation_dict"] = {}
+
+
 
     lora_model.save_pretrained(lora_model_dir)
     print_model(lora_model, "lora_model")

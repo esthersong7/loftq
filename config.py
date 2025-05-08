@@ -76,7 +76,13 @@ class CloQConfig(LoftQConfig):
     quant_dict: dict = field(default_factory=dict, metadata={"help": "Quantized weights per adapter"})
     activation_dict: dict = field(default_factory=dict, metadata={"help": "Activation inputs per adapter"})
 
-
+    def to_dict(self):
+        # 기본 dict으로 변환
+        base = super().to_dict() if hasattr(super(), "to_dict") else self.__dict__.copy()
+        # 저장 불가능한 것 제거
+        base.pop("quant_dict", None)
+        base.pop("activation_dict", None)
+        return base
 
 
 @dataclass
@@ -351,18 +357,18 @@ class LoraConfig(PeftConfig):
             )
         },
     )
+    # # dict type is used when loading config.json
+    # loftq_config: Union[LoftQConfig, dict] = field(
+    #     default_factory=dict,
+    #     metadata={
+    #         "help": (
+    #             "The configuration of LoftQ. If this is passed, then LoftQ will be used to quantize the backbone "
+    #             "weights and initialize Lora layers. Also set `init_lora_weights='loftq'` in this case."
+    #         )
+    #     },
+    # )
     # dict type is used when loading config.json
-    loftq_config: Union[LoftQConfig, dict] = field(
-        default_factory=dict,
-        metadata={
-            "help": (
-                "The configuration of LoftQ. If this is passed, then LoftQ will be used to quantize the backbone "
-                "weights and initialize Lora layers. Also set `init_lora_weights='loftq'` in this case."
-            )
-        },
-    )
-    # dict type is used when loading config.json
-    cloq_config: Union[CloQConfig, dict] = field(
+    loftq_config: Union[CloQConfig, dict] = field(
         default_factory=dict,
         metadata={
             "help": (
